@@ -1,4 +1,4 @@
-# 顔認証 × slack api
+# 顔認証 × slack messaging api
 
 カメラで顔を認識し、入退室を自動判定して Slack に通知する Web アプリケーション
 

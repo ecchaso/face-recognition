@@ -1,0 +1,13 @@
+# 顔データ・個人情報
+~/encodings.pkl
+encodings.pkl
+new_faces/
+logs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 設定（Webhook URLを含むため）
+config.json

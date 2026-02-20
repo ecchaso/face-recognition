@@ -18,16 +18,14 @@ import numpy as np
 class SlackNotifier:
     def __init__(
         self,
-        entry_webhook: str,
-        exit_webhook: str,
+        user_webhooks: dict = {},
         alert_webhook: str = "",
         bot_token: str = "",
         channel_id: str = "",
         timeout_sec: int = 20,
         debug: bool = True,
     ):
-        self.entry_webhook = entry_webhook
-        self.exit_webhook = exit_webhook
+        self.user_webhooks = user_webhooks
         self.alert_webhook = alert_webhook
         self.bot_token = bot_token
         self.channel_id = channel_id
@@ -42,8 +40,7 @@ class SlackNotifier:
         if self._bot_mode():
             self._post_message(text)
         else:
-            self._webhook(self.entry_webhook, text)
-        # 顔画像をローカルに保存
+            self._webhook(self.user_webhooks.get(user, ""), text)
         if face_frame is not None:
             self._save_image(face_frame, user, dt)
 
@@ -52,7 +49,7 @@ class SlackNotifier:
         if self._bot_mode():
             self._post_message(text)
         else:
-            self._webhook(self.exit_webhook, text)
+            self._webhook(self.user_webhooks.get(user, ""), text)
 
     def notify_alert(self, message: str):
         """システム障害・異常をアラート用 Webhook に通知する"""

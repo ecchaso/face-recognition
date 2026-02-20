@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>顔認証エントリーシステム</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Segoe UI", "Noto Sans JP", sans-serif;
+      background: #11111b;
+      color: #cdd6f4;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* ヘッダー */
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 24px;
+      background: #1e1e2e;
+      border-bottom: 1px solid #313244;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 14px; font-weight: 800; letter-spacing: 2px; color: #89b4fa; }
+    #clock     { font-size: 13px; color: #6c7086; font-variant-numeric: tabular-nums; }
+
+    /* メインレイアウト */
+    main {
+      display: flex;
+      flex: 1;
+      gap: 16px;
+      padding: 16px;
+      min-height: 0;
+    }
+
+    /* カメラ */
+    .camera-wrap {
+      flex: 3;
+      background: #1e1e2e;
+      border-radius: 14px;
+      border: 2px solid #313244;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .camera-wrap img { width: 100%; height: 100%; object-fit: contain; display: block; }
+
+    /* 右パネル */
+    .panel {
+      flex: 0 0 240px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    /* ステータスカード */
+    .card {
+      background: #1e1e2e;
+      border: 1px solid #313244;
+      border-radius: 12px;
+      padding: 12px 16px;
+      text-align: center;
+    }
+    .card-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: #6c7086;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 5px;
+    }
+    .card-value {
+      font-size: 18px;
+      font-weight: 700;
+      color: #cdd6f4;
+      transition: color 0.3s;
+    }
+    .green { color: #a6e3a1; }
+    .red   { color: #f38ba8; }
+    .blue  { color: #89dceb; }
+
+    /* 登録ユーザー */
+    .user-list {
+      background: #1e1e2e;
+      border: 1px solid #313244;
+      border-radius: 12px;
+      padding: 12px 16px;
+      flex: 1;
+      overflow-y: auto;
+    }
+    .user-list-title {
+      font-size: 10px;
+      font-weight: 700;
+      color: #6c7086;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+    }
+    .user-list-body { font-size: 13px; color: #a6adc8; line-height: 1.9; }
+
+    /* ボタン */
+    .btn {
+      padding: 9px;
+      border: none;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      background: #313244;
+      color: #cdd6f4;
+      transition: background 0.15s;
+    }
+    .btn:hover { background: #45475a; }
+
+    /* モーダル */
+    #overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.65);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    #overlay.show { display: flex; }
+    #modal {
+      background: #1e1e2e;
+      border: 1px solid #45475a;
+      border-radius: 16px;
+      padding: 36px 40px;
+      text-align: center;
+      min-width: 300px;
+      box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+    }
+    #modal h2 { font-size: 17px; margin-bottom: 8px; }
+    #modal p  { font-size: 13px; color: #a6adc8; margin-bottom: 26px; }
+    .modal-btns { display: flex; gap: 12px; justify-content: center; }
+    .btn-exit {
+      background: #f38ba8; color: #11111b;
+      padding: 10px 26px; border: none; border-radius: 8px;
+      font-size: 13px; font-weight: 700; cursor: pointer;
+    }
+    .btn-exit:hover { background: #ff9db9; }
+    .btn-cancel {
+      background: #313244; color: #cdd6f4;
+      padding: 10px 26px; border: none; border-radius: 8px;
+      font-size: 13px; font-weight: 700; cursor: pointer;
+    }
+    .btn-cancel:hover { background: #45475a; }
+
+    /* トースト */
+    #toast {
+      position: fixed;
+      bottom: 24px; left: 50%;
+      transform: translateX(-50%) translateY(60px);
+      background: #313244; color: #cdd6f4;
+      padding: 10px 24px;
+      border-radius: 8px;
+      font-size: 13px; font-weight: 600;
+      opacity: 0;
+      transition: transform 0.28s, opacity 0.28s;
+      z-index: 200;
+      white-space: nowrap;
+    }
+    #toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>ENTRY SYSTEM</h1>
+  <span id="clock"></span>
+</header>
+
+<main>
+  <div class="camera-wrap">
+    <img src="/video_feed" alt="camera feed">
+  </div>
+
+  <div class="panel">
+    <div class="card">
+      <div class="card-label">認識ユーザー</div>
+      <div class="card-value" id="card-user">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">アクション</div>
+      <div class="card-value" id="card-action">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">最終認識時刻</div>
+      <div class="card-value blue" id="card-time">—</div>
+    </div>
+    <div class="card">
+      <div class="card-label">在室状態</div>
+      <div class="card-value" id="card-status">—</div>
+    </div>
+
+    <div class="user-list">
+      <div class="user-list-title">登録ユーザー</div>
+      <div class="user-list-body" id="user-list">
+        {% if users %}
+          {% for u in users %}• {{ u }}<br>{% endfor %}
+        {% else %}
+          （未登録）
+        {% endif %}
+      </div>
+    </div>
+
+    <button class="btn" onclick="reloadFaces()">顔データ再読込</button>
+  </div>
+</main>
+
+<!-- 退室確認モーダル -->
+<div id="overlay">
+  <div id="modal">
+    <h2>退室確認</h2>
+    <p id="modal-msg"></p>
+    <div class="modal-btns">
+      <button class="btn-exit"   onclick="answerExit(true)">退室する (－)</button>
+      <button class="btn-cancel" onclick="answerExit(false)">キャンセル (<span id="cd">10</span>)</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+  // ── 時計 ──────────────────────────────────
+  const clockEl = document.getElementById("clock");
+  function tick() {
+    clockEl.textContent = new Date().toLocaleTimeString("ja-JP");
+  }
+  tick(); setInterval(tick, 1000);
+
+  // ── カード更新 ────────────────────────────
+  function updateCards(user, actionText, actionClass, statusText, statusClass, time) {
+    document.getElementById("card-user").textContent = user || "—";
+    const a = document.getElementById("card-action");
+    a.textContent = actionText; a.className = "card-value " + actionClass;
+    const s = document.getElementById("card-status");
+    s.textContent = statusText; s.className = "card-value " + statusClass;
+    if (time) document.getElementById("card-time").textContent = time;
+  }
+
+  // ── トースト ──────────────────────────────
+  let toastTimer;
+  function toast(msg) {
+    const el = document.getElementById("toast");
+    el.textContent = msg;
+    el.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => el.classList.remove("show"), 3500);
+  }
+
+  // ── モーダル ──────────────────────────────
+  let modalOpen    = false;
+  let autoCloseTimer;
+  let countdownTimer;
+  const AUTO_CLOSE_SEC = 10;
+
+  function showModal(user) {
+    if (modalOpen) return;
+    modalOpen = true;
+    document.getElementById("modal-msg").textContent = `${user} さん、退室しますか？`;
+    document.getElementById("overlay").classList.add("show");
+
+    // カウントダウン表示
+    let remaining = AUTO_CLOSE_SEC;
+    document.getElementById("cd").textContent = remaining;
+    countdownTimer = setInterval(() => {
+      remaining -= 1;
+      document.getElementById("cd").textContent = remaining;
+    }, 1000);
+
+    // 10秒後に自動キャンセル
+    autoCloseTimer = setTimeout(() => answerExit(false), AUTO_CLOSE_SEC * 1000);
+  }
+
+  function hideModal() {
+    modalOpen = false;
+    clearTimeout(autoCloseTimer);
+    clearInterval(countdownTimer);
+    document.getElementById("overlay").classList.remove("show");
+  }
+
+  async function answerExit(confirmed) {
+    hideModal();
+    await fetch("/api/exit_confirm", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmed })
+    });
+    if (confirmed) {
+      toast("🚪 退室しました");
+    } else {
+      toast("キャンセルしました");
+    }
+  }
+
+  // ── ポーリング（500ms ごとにサーバーの状態を取得）────
+  let prevAction   = null;
+  let prevPending  = null;
+
+  async function poll() {
+    try {
+      const res  = await fetch("/api/status");
+      const data = await res.json();
+
+      // 入室イベント検知（前回と変わったときだけ通知）
+      if (data.action === "entry" && data.action !== prevAction) {
+        updateCards(data.user, "＋ 入室", "green", "在室中", "green", data.time);
+        toast(`✅ ${data.user} が入室しました`);
+      }
+
+      // 退室イベント検知
+      if (data.action === "exit" && data.action !== prevAction) {
+        updateCards(data.user, "－ 退室", "red", "退室済", "red", data.time);
+      }
+
+      // 退室確認ダイアログ
+      if (data.pending_exit && data.pending_exit !== prevPending) {
+        showModal(data.pending_exit);
+      }
+      if (!data.pending_exit && prevPending) {
+        hideModal();
+      }
+
+      prevAction  = data.action;
+      prevPending = data.pending_exit;
+
+    } catch (e) {
+      console.warn("poll error:", e);
+    }
+  }
+
+  // 初回即時実行 + 500ms ごとにポーリング
+  poll();
+  setInterval(poll, 500);
+
+  // ── 顔データ再読込 ────────────────────────
+  async function reloadFaces() {
+    const res  = await fetch("/api/reload_faces", { method: "POST" });
+    const data = await res.json();
+    if (data.ok) {
+      document.getElementById("user-list").innerHTML = data.users.length
+        ? data.users.map(u => `• ${u}`).join("<br>")
+        : "（未登録）";
+      toast("顔データを再読込しました");
+    }
+  }
+</script>
+</body>
+</html>

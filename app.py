@@ -9,7 +9,10 @@
 import cv2
 import time
 import threading
+import logging
+import logging.handlers
 from datetime import datetime
+from pathlib import Path
 
 from flask import Flask, Response, render_template, jsonify, request
 
@@ -19,6 +22,34 @@ from attendance_manager import AttendanceManager
 from slack_notifier import SlackNotifier
 
 app = Flask(__name__)
+
+# ══════════════════════════════════════════════
+# 構造化ログ設定
+# ══════════════════════════════════════════════
+def setup_logger() -> logging.Logger:
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    logger = logging.getLogger("face_entry")
+    logger.setLevel(logging.DEBUG)
+
+    fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    # ファイル: 1MB で最大5世代ローテーション
+    fh = logging.handlers.RotatingFileHandler(
+        log_dir / "app.log", maxBytes=1_000_000, backupCount=5, encoding="utf-8"
+    )
+    fh.setFormatter(fmt)
+    # コンソール
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt)
+
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    return logger
+
+logger = setup_logger()
 
 # ══════════════════════════════════════════════
 # 初期化
@@ -34,6 +65,7 @@ attendance = AttendanceManager(
 )
 notifier = SlackNotifier(
     user_webhooks = config.get("slack", "user_webhooks") or {},
+    alert_webhook = config.get("slack", "alert_webhook") or "",
 )
 
 # ══════════════════════════════════════════════
@@ -58,6 +90,13 @@ cooldown_sec  = config.get("settings", "cooldown_sec")
 last_rec_lock = threading.Lock()
 last_rec_times: dict[str, datetime] = {}
 
+# ウォッチドッグ用ハートビート（各スレッドが定期更新）
+heartbeat_lock = threading.Lock()
+heartbeat: dict[str, float] = {
+    "camera":      time.time(),
+    "recognition": time.time(),
+}
+
 
 # ══════════════════════════════════════════════
 # カメラスレッド
@@ -74,16 +113,20 @@ def camera_worker():
     cap.set(cv2.CAP_PROP_BUFFERSIZE,   1)
 
     if not cap.isOpened():
-        print(f"[Camera] カメラ {idx} を開けませんでした")
+        logger.error(f"カメラ {idx} を開けませんでした")
         return
 
-    print(f"[Camera] 起動 (index={idx}, MJPG, 640x480, 15fps)")
+    logger.info(f"カメラ起動 (index={idx}, MJPG, 640x480, 15fps)")
 
     while True:
         ret, frame = cap.read()
         if not ret:
             time.sleep(0.05)
             continue
+
+        # ウォッチドッグ用ハートビート更新
+        with heartbeat_lock:
+            heartbeat["camera"] = time.time()
 
         # 最新の顔検出結果で毎フレーム枠を描画（15fps を維持）
         with face_lock:
@@ -114,6 +157,10 @@ def recognition_worker():
     while True:
         time.sleep(interval)
 
+        # ウォッチドッグ用ハートビート更新
+        with heartbeat_lock:
+            heartbeat["recognition"] = time.time()
+
         # 退室確認待ち中は認識しない
         with status_lock:
             if status["pending_exit"] is not None:
@@ -132,6 +179,17 @@ def recognition_worker():
             latest_face["loc"]  = face_loc
 
         if not name or name == "unknown":
+            # unknown の顔画像をクールダウン付きで保存
+            if name == "unknown" and face_loc is not None:
+                now = datetime.now()
+                with last_rec_lock:
+                    last = last_rec_times.get("unknown")
+                    if not last or (now - last).total_seconds() >= cooldown_sec:
+                        last_rec_times["unknown"] = now
+                        with frame_lock:
+                            unknown_frame = raw_frame.copy() if raw_frame is not None else None
+                        if unknown_frame is not None:
+                            notifier.save_unknown_image(unknown_frame, now)
             continue
 
         # クールダウンチェック
@@ -144,7 +202,7 @@ def recognition_worker():
 
         # 出退勤判定
         action = attendance.check_action(name)
-        print(f"[Recognition] {name} → {action}")
+        logger.info(f"認識: {name} → {action}")
 
         if action == "entry":
             dt = attendance.record_entry(name)
@@ -158,12 +216,12 @@ def recognition_worker():
                     "time":         dt.strftime("%H:%M:%S"),
                     "pending_exit": None,
                 })
-            print(f"[Entry] {name} {dt.strftime('%H:%M:%S')}")
+            logger.info(f"入室: {name} {dt.strftime('%H:%M:%S')}")
 
         elif action == "exit_confirm":
             with status_lock:
                 status["pending_exit"] = name
-            print(f"[ExitConfirm] {name} 退室確認待ち")
+            logger.info(f"退室確認待ち: {name}")
 
 
 # ══════════════════════════════════════════════
@@ -233,9 +291,9 @@ def api_exit_confirm():
                 "action": "exit",
                 "time":   dt.strftime("%H:%M:%S"),
             })
-        print(f"[Exit] {user} {dt.strftime('%H:%M:%S')}")
+        logger.info(f"退室: {user} {dt.strftime('%H:%M:%S')}")
     else:
-        print(f"[ExitCancelled] {user}")
+        logger.info(f"退室キャンセル: {user}")
 
     return jsonify({"ok": True})
 
@@ -248,10 +306,77 @@ def api_reload_faces():
 
 
 # ══════════════════════════════════════════════
+# ウォッチドッグスレッド
+# ══════════════════════════════════════════════
+
+# 各スレッドのハートビートがこの秒数を超えたら異常とみなす
+WATCHDOG_TIMEOUT_SEC = 10
+WATCHDOG_INTERVAL_SEC = 5
+
+def watchdog_worker():
+    """camera_worker / recognition_worker のハートビートを監視する"""
+    # アラート送信の連続抑制（同じ異常で何度も送らない）
+    alerted: dict[str, bool] = {"camera": False, "recognition": False}
+
+    while True:
+        time.sleep(WATCHDOG_INTERVAL_SEC)
+        now = time.time()
+
+        with heartbeat_lock:
+            beats = heartbeat.copy()
+
+        for name, last in beats.items():
+            elapsed = now - last
+            if elapsed > WATCHDOG_TIMEOUT_SEC:
+                if not alerted[name]:
+                    msg = f"{name}_worker が {elapsed:.0f}秒間応答なし"
+                    logger.error(f"[Watchdog] {msg}")
+                    notifier.notify_alert(msg)
+                    alerted[name] = True
+            else:
+                if alerted[name]:
+                    msg = f"{name}_worker が復旧しました"
+                    logger.info(f"[Watchdog] {msg}")
+                    notifier.notify_alert(msg)
+                    alerted[name] = False
+
+
+# ══════════════════════════════════════════════
+# USB カメラ監視スレッド
+# ══════════════════════════════════════════════
+
+USB_CHECK_INTERVAL_SEC = 10
+
+def usb_monitor_worker():
+    """カメラデバイスファイルの存在を監視する"""
+    idx = config.get("settings", "camera_index")
+    device_path = Path(f"/dev/video{idx}")
+    was_present = device_path.exists()
+
+    while True:
+        time.sleep(USB_CHECK_INTERVAL_SEC)
+        now_present = device_path.exists()
+
+        if was_present and not now_present:
+            msg = f"カメラデバイス {device_path} が切断されました"
+            logger.error(f"[USBMonitor] {msg}")
+            notifier.notify_alert(msg)
+
+        elif not was_present and now_present:
+            msg = f"カメラデバイス {device_path} が再接続されました"
+            logger.info(f"[USBMonitor] {msg}")
+            notifier.notify_alert(msg)
+
+        was_present = now_present
+
+
+# ══════════════════════════════════════════════
 # エントリーポイント
 # ══════════════════════════════════════════════
 if __name__ == "__main__":
     threading.Thread(target=camera_worker,      daemon=True).start()
     threading.Thread(target=recognition_worker, daemon=True).start()
-    print("[App] http://localhost:5000 で起動します")
+    threading.Thread(target=watchdog_worker,    daemon=True).start()
+    threading.Thread(target=usb_monitor_worker, daemon=True).start()
+    logger.info("http://localhost:5000 で起動します")
     app.run(host="0.0.0.0", port=5000, threaded=True, debug=False)

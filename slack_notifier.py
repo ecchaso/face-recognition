@@ -34,19 +34,6 @@ class SlackNotifier:
         self.timeout_sec = timeout_sec
         self.debug = debug
 
-        # ──────────────────────────────────────────
-        # KIT プロキシの設定
-        # ──────────────────────────────────────────
-        self.proxy_url = "http://wwwproxy.kanazawa-it.ac.jp:8080"
-        
-        # プロキシハンドラを作成し、urllibのデフォルトの「開き方」として登録
-        proxy_handler = urllib.request.ProxyHandler({
-            "http": self.proxy_url,
-            "https": self.proxy_url
-        })
-        self.opener = urllib.request.build_opener(proxy_handler)
-        # これ以降、self.opener.open() を使うことでプロキシを経由します
-
     # ──────────────────────────────────────────
     # Public API
     # ──────────────────────────────────────────
@@ -83,29 +70,20 @@ class SlackNotifier:
     # 汎用 HTTP リクエスト（プロキシ & リダイレクト対応）
     # ──────────────────────────────────────────
     def _http_request(self, url: str, method: str, data: bytes, headers: dict) -> bytes:
-        """プロキシを経由し、リダイレクト(302等)を検出し再送する"""
-        
-        # POST/PUT の場合、Content-Length を明示的に設定
         headers["Content-Length"] = str(len(data))
-        
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
-        
         try:
-            # urlopen ではなく、プロキシ設定済みの opener を使用
-            with self.opener.open(req, timeout=self.timeout_sec) as res:
+            with urllib.request.urlopen(req, timeout=self.timeout_sec) as res:
                 return res.read()
         except urllib.error.HTTPError as e:
-            # 301, 302, 307, 308 のリダイレクト処理
             if e.code in (301, 302, 307, 308):
                 new_url = e.headers.get("Location")
                 if new_url:
-                    self._log(f"[DEBUG] {e.code} Redirecting: {url} -> {new_url}")
                     return self._http_request(new_url, method, data, headers)
-            
             return e.read()
         except Exception as e:
             self._log(f"[CRITICAL] Network Error: {e}")
-            raise e
+            raise
 
     # ──────────────────────────────────────────
     # Slack API / 個別処理 (変更なし)
